@@ -1,9 +1,16 @@
-﻿namespace Lace.Benchmarks;
+﻿using BenchmarkDotNet.Running;
 
-internal class Program
+using RhoMicro.CodeAnalysis.Benchmarks;
+
+if(new TemplateBenchmark().Template() != new TemplateBenchmark().StringBuilder())
 {
-    static void Main(string[] args)
-    {
-        Console.WriteLine("Hello, World!");
-    }
+    Console.WriteLine("Template:");
+    Console.WriteLine(new TemplateBenchmark().Template());
+
+    Console.WriteLine("StringBuilder:");
+    Console.WriteLine(new TemplateBenchmark().StringBuilder());
+
+    throw new Exception();
 }
+
+_ = BenchmarkRunner.Run<TemplateBenchmark>();

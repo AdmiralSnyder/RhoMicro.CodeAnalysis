@@ -1,7 +1,4 @@
 ﻿namespace RhoMicro.CodeAnalysis.Library.Models;
-
-using System.Runtime.CompilerServices;
-
 [Flags]
 #if RHOMICRO_CODEANALYSIS_UTILITYGENERATORS
 [IncludeFile]
@@ -11,10 +8,11 @@ internal enum AttributeParameterTypeKind
     ReferenceType = 1,
     Type = 2,
     ValueType = 4,
+    Enum = 8,
 
-    Nullable = 8,
-    Array = 16,
-    NullableArray = 32,
+    Nullable = 16,
+    Array = 32,
+    NullableArray = 64,
 
     NullableType = Nullable | Type,
     NullableReferenceType = Nullable | ReferenceType,
@@ -24,10 +22,12 @@ internal enum AttributeParameterTypeKind
 
     TypeArray = Type | Array,
     ValueTypeArray = ValueType | Array,
+    EnumArray = Enum | Array,
     ReferenceTypeArray = ReferenceType | Array,
 
     TypeNullableArray = Type | NullableArray,
     ValueTypeNullableArray = ValueType | NullableArray,
+    EnumNullableArray = Enum | NullableArray,
     ReferenceTypeNullableArray = ReferenceType | NullableArray,
 
     NullableTypeNullableArray = Nullable | Type | NullableArray,
@@ -36,8 +36,7 @@ internal enum AttributeParameterTypeKind
 
 internal static class AttributeArgumentTypeKindExtensions
 {
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static Boolean HasFlagsFast(this AttributeParameterTypeKind value, params ReadOnlySpan<AttributeParameterTypeKind> flags)
+    public static Boolean HasAnyFlagFast(this AttributeParameterTypeKind value, params ReadOnlySpan<AttributeParameterTypeKind> flags)
     {
         foreach(var flag in flags)
         {
@@ -48,21 +47,23 @@ internal static class AttributeArgumentTypeKindExtensions
         return false;
     }
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static String ToStringFast(this AttributeParameterTypeKind value) => value switch
     {
         AttributeParameterTypeKind.ReferenceType => nameof(AttributeParameterTypeKind.ReferenceType),
         AttributeParameterTypeKind.Type => nameof(AttributeParameterTypeKind.Type),
         AttributeParameterTypeKind.ValueType => nameof(AttributeParameterTypeKind.ValueType),
+        AttributeParameterTypeKind.Enum => nameof(AttributeParameterTypeKind.Enum),
         AttributeParameterTypeKind.NullableType => nameof(AttributeParameterTypeKind.NullableType),
         AttributeParameterTypeKind.NullableReferenceType => nameof(AttributeParameterTypeKind.NullableReferenceType),
         AttributeParameterTypeKind.NullableTypeArray => nameof(AttributeParameterTypeKind.NullableTypeArray),
         AttributeParameterTypeKind.NullableReferenceTypeArray => nameof(AttributeParameterTypeKind.NullableReferenceTypeArray),
         AttributeParameterTypeKind.TypeArray => nameof(AttributeParameterTypeKind.TypeArray),
         AttributeParameterTypeKind.ValueTypeArray => nameof(AttributeParameterTypeKind.ValueTypeArray),
+        AttributeParameterTypeKind.EnumArray => nameof(AttributeParameterTypeKind.EnumArray),
         AttributeParameterTypeKind.ReferenceTypeArray => nameof(AttributeParameterTypeKind.ReferenceTypeArray),
         AttributeParameterTypeKind.TypeNullableArray => nameof(AttributeParameterTypeKind.TypeNullableArray),
         AttributeParameterTypeKind.ValueTypeNullableArray => nameof(AttributeParameterTypeKind.ValueTypeNullableArray),
+        AttributeParameterTypeKind.EnumNullableArray => nameof(AttributeParameterTypeKind.EnumNullableArray),
         AttributeParameterTypeKind.ReferenceTypeNullableArray => nameof(AttributeParameterTypeKind.ReferenceTypeNullableArray),
         AttributeParameterTypeKind.NullableTypeNullableArray => nameof(AttributeParameterTypeKind.NullableTypeNullableArray),
         AttributeParameterTypeKind.NullableReferenceTypeNullableArray => nameof(AttributeParameterTypeKind.NullableReferenceTypeNullableArray),

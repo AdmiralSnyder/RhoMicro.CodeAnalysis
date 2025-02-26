@@ -1,12 +1,16 @@
 ﻿namespace RhoMicro.CodeAnalysis;
 
+using System;
+
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 using RhoMicro.CodeAnalysis.Library.Models;
-using RhoMicro.CodeAnalysis.Library.Models.Collections;
 using RhoMicro.CodeAnalysis.Library.Text.SourceTexts;
 using RhoMicro.CodeAnalysis.Library.Text.Templating;
 using RhoMicro.CodeAnalysis.Templating;
+using RhoMicro.CodeAnalysis.Templating.Syntax;
+using RhoMicro.CodeAnalysis.Templating.Syntax.Visitors;
 
 /// <summary>
 /// Generates template classes from string templates.
@@ -15,12 +19,14 @@ using RhoMicro.CodeAnalysis.Templating;
 public class TemplatingGenerator : IIncrementalGenerator
 {
     private const String _attributeMetadataName = "RhoMicro.CodeAnalysis.TemplateAttribute";
+    private const Int32 _parserTimeout = 100;
+
     /// <inheritdoc/>
     public void Initialize(IncrementalGeneratorInitializationContext context)
     {
-        var provider = context.SyntaxProvider.ForAttributeWithMetadataName<(NamedTypeModel type, TemplateAttribute.Model attribute)?>(
+        var provider = context.SyntaxProvider.ForAttributeWithMetadataName<(NamedTypeModel, TemplateString, TemplateAttribute.Model)?>(
             _attributeMetadataName,
-            static (_, _) => true,
+            static (n, _) => n is RecordDeclarationSyntax or ClassDeclarationSyntax or StructDeclarationSyntax,
             static (ctx, ct) =>
             {
                 ct.ThrowIfCancellationRequested();
@@ -29,31 +35,57 @@ public class TemplatingGenerator : IIncrementalGenerator
                     {
                         TargetSymbol: INamedTypeSymbol target,
                         Attributes: [{ } attributeData, ..]
-                    } || !attributeData.TryGetTemplateAttributeModel(out var attribute, cancellationToken: ct))
+                    }
+                    || !attributeData.TryGetTemplateAttributeModel(out var attribute, cancellationToken: ct)
+                    || attributeData.ApplicationSyntaxReference?.GetSyntax(ct) is not AttributeSyntax
+                    {
+                        ArgumentList.Arguments: [{ Expression: LiteralExpressionSyntax { Token: var token } }, ..]
+                    })
                 {
                     return null;
                 }
 
                 using var modelCtx = ModelCreationContext.CreateDefault(ct);
+                var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(_parserTimeout);
+                var templateString = TemplateString.Create(token, cts.Token);
                 var typeModel = NamedTypeModel.Create(target, in modelCtx);
-                var result = (typeModel, attribute);
+                var result = (typeModel, templateString, attribute);
 
                 return result;
-            }).Where(t => t.HasValue)
-            .Select((t, ct) =>
+            })
+            .Where(static t => t.HasValue)
+            .Select(static (t, ct) =>
             {
                 ct.ThrowIfCancellationRequested();
 
-                using var ctx = ModelCreationContext.CreateDefault(ct);
-                var template = TemplateSyntaxModel.Parse(t!.Value.attribute.TemplateString, in ctx);
+                var (type, templateString, attribute) = t!.Value;
+                var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(_parserTimeout);
+                using var ctx = ModelCreationContext.CreateDefault(cts.Token);
+                var scanResult = Lexer.Scan(templateString, attribute.NewlineValue.Length, in ctx);
 
-                return (t.Value.type, template, t.Value.attribute);
+                return (type, scanResult, attribute);
             })
-            .Select(IsbImpl);
+            .Select(static (t, ct) =>
+            {
+                ct.ThrowIfCancellationRequested();
 
-        context.RegisterSourceOutput(provider, (ctx, t) => ctx.AddSource(t.hintName, t.source));
+                var (type, scanResult, attribute) = t;
+                var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(_parserTimeout);
+                using var ctx = ModelCreationContext.CreateDefault(cts.Token);
+                var parseResult = Parser.Parse(scanResult, in ctx);
+
+                return (type, parseResult, attribute);
+            });
+
+        var isbProvider = provider.Select(IsbImpl);
+        context.RegisterSourceOutput(isbProvider, (ctx, t) => ctx.AddSource(t.hintName, t.source));
     }
-    private static (String hintName, String source) IsbImpl((NamedTypeModel type, TemplateSyntaxModel template, TemplateAttribute.Model attribute) t, CancellationToken ct)
+    private static (String hintName, String source) IsbImpl(
+        (NamedTypeModel type, ParseResult parseResult, TemplateAttribute.Model attribute) t,
+        CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
 
@@ -63,7 +95,11 @@ public class TemplatingGenerator : IIncrementalGenerator
             GeneratorName = typeof(TemplatingGenerator).FullName
         });
 
-        var (type, template, attribute) = t;
+        var (type, parseResult, attribute) = t;
+        var scanResult = parseResult.ScanResult;
+        var template = parseResult.Syntax;
+        var templateString = scanResult.TemplateString;
+        var diagnostics = parseResult.AllDiagnostics;
 
         foreach(var u in attribute.Usings)
             sourceBuilder.Append("using ").Append(u).Append(';').AppendLineCore();
@@ -71,229 +107,150 @@ public class TemplatingGenerator : IIncrementalGenerator
         type.BuildStrings(
             sourceBuilder,
             out var hintName,
-            out _,
+            out var displayString,
             ["global::RhoMicro.CodeAnalysis.Library.Text.Templating.ITemplate"],
             ct);
 
         if(attribute.GenerateToString)
         {
             sourceBuilder
-                .Append("public override unsafe string ToString()")
-                .OpenBracesBlock()
-                .AppendLine("var buffer = new global::RhoMicro.CodeAnalysis.Library.Text.Templating.DynamicallyAllocatedBuffer<char>();")
-                .Append("try")
-                .OpenBracesBlock()
-                    .AppendLine("this.Render(ref buffer);")
-                    .AppendLine("fixed(char* chars = buffer.Span)")
-                    .Indent().AppendLine("return new(chars, 0, buffer.Span.Length);").Detent()
-                .CloseBlock()
-                .Append("finally")
-                .OpenBracesBlock()
-                    .Append("buffer.Dispose();")
-                .CloseBlock()
-                .CloseBlockCore();
+                .AppendLine("public override string ToString()")
+                .Indent()
+                    .AppendLine("=> global::RhoMicro.CodeAnalysis.Library.Text.Templating.TemplateRenderer.Render(this);")
+                    .AppendLine()
+                .Detent()
+
+                .Append("public string RenderToString<")
+                .Append(attribute.BodyParameterTypeName)
+                .Append(">(in ")
+                .Append(attribute.BodyParameterTypeName).AppendLine(" body)")
+                .Indent()
+                    .Append("where ").Append(attribute.BodyParameterTypeName).AppendLine(" : global::RhoMicro.CodeAnalysis.Library.Text.Templating.ITemplate")
+                    .Append("=> global::RhoMicro.CodeAnalysis.Library.Text.Templating.TemplateRenderer.Render<")
+                    .Append(displayString)
+                    .Append(", ")
+                    .Append(attribute.BodyParameterTypeName)
+                    .AppendLine(">(this, body);")
+                    .AppendLine()
+                .Detent()
+
+                .Append("public string RenderToString<")
+                .Append(attribute.BodyParameterTypeName)
+                .Append(">(in ")
+                .Append(attribute.BodyParameterTypeName)
+                .AppendLine(" body, global::System.Threading.CancellationToken cancellationToken)")
+                .Indent()
+                    .Append("where ").Append(attribute.BodyParameterTypeName).AppendLine(" : global::RhoMicro.CodeAnalysis.Library.Text.Templating.ITemplate")
+                    .Append("=> global::RhoMicro.CodeAnalysis.Library.Text.Templating.TemplateRenderer.Render<")
+                    .Append(displayString)
+                    .Append(", ")
+                    .Append(attribute.BodyParameterTypeName)
+                    .AppendLine(">(this, body, cancellationToken);")
+                    .AppendLine()
+                .Detent()
+
+                .AppendLine(
+                    "public string RenderToString(" +
+                    "global::System.Threading.CancellationToken cancellationToken)")
+                .Indent()
+                    .AppendLine("=> " +
+                        "global::RhoMicro.CodeAnalysis.Library.Text.Templating.TemplateRenderer.Render(" +
+                        "this, cancellationToken" +
+                        ");")
+                    .AppendLine()
+                .DetentCore();
         }
 
         sourceBuilder
-            .Append(
-                "public void Render(" +
-                "ref global::RhoMicro.CodeAnalysis.Library.Text.Templating.DynamicallyAllocatedBuffer<char> __buffer, " +
-                "global::System.ReadOnlySpan<Char> __indentation = default, " +
-                "global::System.Threading.CancellationToken __cancellationToken = default)")
+            .Append("public void Render<")
+            .Append(attribute.BodyParameterTypeName)
+            .AppendLine(">(")
+            .Indent()
+                .Append("ref global::RhoMicro.CodeAnalysis.Library.Text.Templating.TemplateRenderer ")
+                .Append(attribute.RendererParameterName).AppendLine(',')
+                .Append(attribute.BodyParameterTypeName).Append(' ')
+                .Append(attribute.BodyParameterName).AppendLine(',')
+                .Append("global::System.Threading.CancellationToken ")
+                .Append(attribute.CancellationTokenParameterName).AppendLine(')')
+                .Append("where ").Append(attribute.BodyParameterTypeName).Append(" : global::RhoMicro.CodeAnalysis.Library.Text.Templating.ITemplate")
+            .Detent()
             .OpenBracesBlock()
-            .AppendLine("__cancellationToken.ThrowIfCancellationRequested();")
+            .Append(attribute.CancellationTokenParameterName).AppendLine(".ThrowIfCancellationRequested();")
+            .AppendLine()
+            .Append("// This template was taken from: ")
+            .Append(templateString.Path)
+            .Append('(').Append(templateString.Start.Line.ToString()).Append(',').Append(templateString.Start.Character.ToString()).AppendLine(')')
             .Append("const string __template =").AppendLineCore();
 
         var detentCount = 0;
         for(; detentCount < sourceBuilder.OpenBlocks; detentCount++)
             sourceBuilder.DetentCore();
 
+        var quotes = new String('"', scanResult.RequiredQuotes);
         sourceBuilder
-            .AppendLine("\"\"\"")
-            .AppendLine(template.Source.Text)
-            .AppendCore("\"\"\";");
+            .Append(quotes)
+            .AppendLineCore();
+
+        template.Accept(
+            new TemplateStringReconstructionVisitor(
+            newline: attribute.NewlineValue,
+            sourceBuilder,
+            ct));
+
+        sourceBuilder
+            .AppendLine()
+            .Append(quotes)
+            .AppendCore(";");
 
         for(; detentCount > 0; detentCount--)
             sourceBuilder.IndentCore();
 
-        _ = sourceBuilder.AppendLine()
-            .AppendLine("var __templateSpan = __template.AsSpan();")
-            .OpenBracesBlock();
+        sourceBuilder.AppendLine().AppendLineCore();
 
-        foreach(var templateChild in template.Children)
-        {
-            if(templateChild is TextSyntaxModel)
-            {
-                sourceBuilder
-                    .Append("global::RhoMicro.CodeAnalysis.Library.Text.Templating.TemplateRuntimeHelpers.Render(__templateSpan.Slice(")
-                    .Append(templateChild.Source.Start.ToString()).Append(", ").Append(templateChild.Source.Length.ToString())
-                    .Append("), ref __buffer, __indentation, __cancellationToken);").AppendLineCore();
-            } else if(templateChild is ValueSyntaxModel)
-            {
-                var valueExpression = GetValueString(templateChild);
-
-                sourceBuilder
-                    .Append("global::RhoMicro.CodeAnalysis.Library.Text.Templating.TemplateRuntimeHelpers.Render(")
-                    .Append(valueExpression).Append(", ref __buffer, __indentation, __cancellationToken);").AppendLineCore();
-            } else if(templateChild is CodeSyntaxModel code)
-            {
-                foreach(var codeChild in code.Children)
-                {
-                    if(codeChild is TextSyntaxModel)
-                    {
-                        sourceBuilder.AppendCore(codeChild.Source.ToString());
-                    } else if(codeChild is ValueSyntaxModel)
-                    {
-                        var variableName = GetValueString(codeChild);
-
-                        sourceBuilder
-                            .Append("global::RhoMicro.CodeAnalysis.Library.Text.Templating.TemplateRuntimeHelpers.Render(")
-                            .Append(variableName).AppendCore(", ref __buffer, __indentation, __cancellationToken);");
-                    }
-                }
-            }
-        }
+        AppendDebugComment(sourceBuilder, attribute, template, ct);
+        AppendDiagnostics(sourceBuilder, diagnostics, ct);
+        AppendTemplate(sourceBuilder, template, attribute, templateString, ct);
 
         var source = sourceBuilder.CloseAllBlocks().ToString();
 
         return (hintName, source);
     }
-
-    private static unsafe String GetValueString(TemplateChildSyntaxModel model)
+    private static void AppendTemplate(
+        IndentedStringBuilder sourceBuilder,
+        TemplateSyntax template,
+        TemplateAttribute.Model attribute,
+        TemplateString templateString,
+        CancellationToken ct)
     {
-        var span = model.Source.AsSpan[2..^1];
+        ct.ThrowIfCancellationRequested();
 
-        fixed(Char* chars = span)
-            return new(chars, 0, span.Length);
+        template.Accept(new SourceGeneratingTemplateVisitor(sourceBuilder, attribute, templateString, ct));
     }
-}
-
-//[Template(
-//"""
-
-//""")]
-//internal partial record Template(NamedTypeModel Type, TemplateSyntaxModel Template, TemplateAttribute.Model Attribute);
-
-//[Template(
-//"""
-//<auto-generated/>
-//#pragma warning disable
-//#nullable enable
-
-//namespace §{
-//    for(var i = 0; i < Model.NamespaceParts.Count; i++)
-//    {
-//        if(i != 0)
-//            §('.')
-
-//        §(Model.NamespaceParts[i])
-//    }
-//};
-
-////TODO: containing type
-//partial §(Model.Kind.Value) §(Model.Name)§{
-//    if(Model.TypeArguments.Count > 0)
-//    {
-//        §('<')
-
-//        for(var i = 0; i < Model.TypeArguments.Count; i++)
-//        {
-//            §(Model.TypeArguments[i])
-//        }
-
-//        §('>')
-//    }
-//}{
-//§(Body)
-//}
-//""")]
-//internal partial record struct NamedTypeTemplate<TBody>(NamedTypeModel Model, TBody Body)
-//    where TBody : ITemplate;
-
-//[Template(
-//"""
-//partial §(model.TypeModifier)§(Params)
-//{
-//    §(body)
-//}
-//""")]
-/*
-[NonEquatable]
-internal readonly partial struct ContainingType<TBody>(ContainingTypeModel model, TBody body)
-    where TBody : ITemplate
-{
-    private TypeParametersTemplate Params => new(model.TypeParameters);
-    public void Render(ref global::RhoMicro.CodeAnalysis.Library.Text.Templating.DynamicallyAllocatedBuffer<char> __buffer, ReadOnlySpan<Char> __indentation)
+    private static void AppendDiagnostics(IndentedStringBuilder sourceBuilder, IEnumerable<Templating.Diagnostic> diagnostics, CancellationToken ct)
     {
-        const string __template =
-"""
-partial §(model.TypeModifier)§(Params)
-{
-§(" ", body)
-}
-""";
+        ct.ThrowIfCancellationRequested();
 
-        global::System.ReadOnlySpan<char> __templateSpan = __template.AsSpan();
-
-        if(__indentation.Length == 0)
+        foreach(var diagnostic in diagnostics)
         {
-            __buffer.Add(__templateSpan.Slice(0, 8));
-            global::RhoMicro.CodeAnalysis.Library.Text.Templating.TemplateRuntimeHelpers.Render(model.TypeModifier, ref __buffer);
-            global::RhoMicro.CodeAnalysis.Library.Text.Templating.TemplateRuntimeHelpers.Render(Params, ref __buffer);
-            __buffer.Add(__templateSpan.Slice(38, 9));
-
-            var __indentation1Span = __templateSpan.Slice(41, 4);
-            Span<Char> __indentation1 = stackalloc Char[__indentation.Length + 4];
-            __indentation.CopyTo(__indentation1);
-            __indentation1Span.CopyTo(__indentation1[__indentation.Length..]);
-
-            global::RhoMicro.CodeAnalysis.Library.Text.Templating.TemplateRuntimeHelpers.Render(body, ref __buffer, __indentation1);
-
-            global::RhoMicro.CodeAnalysis.Library.Text.Templating.TemplateRuntimeHelpers.Render(body, ref __buffer);
-            __buffer.Add(__templateSpan.Slice(54, 3));
-        } else
-        {
-            // no nl
-            __buffer.Add(__templateSpan.Slice(0, 8));
-            global::RhoMicro.CodeAnalysis.Library.Text.Templating.TemplateRuntimeHelpers.Render(model.TypeModifier, ref __buffer);
-            global::RhoMicro.CodeAnalysis.Library.Text.Templating.TemplateRuntimeHelpers.Render(Params, ref __buffer);
-            // nl at index 38
-            __buffer.Add(__templateSpan.Slice(38, 1));
-            __buffer.Add(__indentation);
-            // {nl at index 39
-            __buffer.Add(__templateSpan.Slice(39, 2));
-            __buffer.Add(__indentation);
-            // spspspsp at index 42
-            var __indentation1Span = __templateSpan.Slice(41, 4);
-            __buffer.Add(__indentation1Span);
-
-            Span<Char> __indentation1 = stackalloc Char[__indentation.Length + 4];
-            __indentation.CopyTo(__indentation1);
-            __indentation1Span.CopyTo(__indentation1[__indentation.Length..]);
-
-            global::RhoMicro.CodeAnalysis.Library.Text.Templating.TemplateRuntimeHelpers.Render(body, ref __buffer, __indentation1);
-
-            __buffer.Add(__templateSpan.Slice(54, 3));
+            sourceBuilder
+                .Append("// ")
+                .Append(diagnostic.ToString())
+                .AppendLineCore();
         }
     }
-}
-*/
-
-[Template(
-"""
-§{
-if(typeParameters.Count > 0)
-{
-    §('<')
-
-    for(var i = 0; i < typeParameters.Count; i++)
+    private static void AppendDebugComment(
+        IndentedStringBuilder sourceBuilder,
+        TemplateAttribute.Model attribute,
+        TemplateSyntax template,
+        CancellationToken ct)
     {
-        §(typeParameters[i])
-    }
+        ct.ThrowIfCancellationRequested();
 
-    §('>')
+        if(!attribute.GenerateDebugInfo)
+            return;
+
+        var xmlTree = template.ToCommentXmlTreeString(ct);
+
+        sourceBuilder.Append(xmlTree).AppendLineCore();
+    }
 }
-}
-""", Usings = [])]
-[NonEquatable]
-internal readonly partial struct TypeParametersTemplate(EquatableList<String> typeParameters);

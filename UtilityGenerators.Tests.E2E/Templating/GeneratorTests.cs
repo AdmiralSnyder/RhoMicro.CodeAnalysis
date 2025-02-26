@@ -1,10 +1,9 @@
-﻿#pragma warning disable CS1591 // Missing XML comment for publicly visible type or member
+﻿#pragma warning disable  // Missing XML comment for publicly visible type or member
 namespace RhoMicro.CodeAnalysis.UtilityGenerators.Tests.E2E.Templating;
 
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
-
-using Newtonsoft.Json.Linq;
 
 using RhoMicro.CodeAnalysis;
 using RhoMicro.CodeAnalysis.Library.Text.Templating;
@@ -20,9 +19,7 @@ public partial class GeneratorTests
     public void EmptyTemplateRendersEmptyString()
     {
         var template = new EmptyTemplate();
-        var buffer = new DynamicallyAllocatedBuffer<Char>();
-        template.Render(ref buffer);
-        var actual = new String(buffer.Span);
+        var actual = TemplateRenderer.Render(template);
 
         Assert.Equal("", actual);
     }
@@ -33,17 +30,39 @@ public partial class GeneratorTests
     public void SimpleTextTemplateRendersExpectedString()
     {
         var template = new SimpleTextTemplate();
-        var buffer = new DynamicallyAllocatedBuffer<Char>();
-        template.Render(ref buffer);
-        var actual = new String(buffer.Span);
+        var actual = TemplateRenderer.Render(template);
 
         Assert.Equal("Hello, World!", actual);
     }
-    [Template("§(Foo)")]
+    [Template("(:Foo:)")]
     private sealed partial class SimpleValueTemplate
     {
         public SimpleValueTemplate(String foo) => Foo = foo;
         private String Foo { get; }
+    }
+    [Template("\n", Newline = Newline.CarriageReturnNewline)]
+    private sealed partial class NewlineTemplate;
+    [Fact]
+    public void NewlineTemplateRenders()
+    {
+        var actual = new NewlineTemplate().ToString();
+        Assert.Equal("\r\n", actual);
+    }
+    [Template("\r", Newline = Newline.Newline)]
+    private sealed partial class CarriageReturnTemplate;
+    [Fact]
+    public void CarriageReturnTemplateRenders()
+    {
+        var actual = new CarriageReturnTemplate().ToString();
+        Assert.Equal("\n", actual);
+    }
+    [Template("\r\n", Newline = Newline.Newline)]
+    private sealed partial class CarriageReturnNewlineTemplate;
+    [Fact]
+    public void CarriageReturnNewlineTemplateRenders()
+    {
+        var actual = new CarriageReturnNewlineTemplate().ToString();
+        Assert.Equal("\n", actual);
     }
     [Theory]
     [InlineData("")]                                                        // Empty string
@@ -68,16 +87,14 @@ public partial class GeneratorTests
     public void SimpleValueTemplateRendersExpectedString(String value)
     {
         var template = new SimpleValueTemplate(value);
-        var buffer = new DynamicallyAllocatedBuffer<Char>();
-        template.Render(ref buffer);
-        var actual = new String(buffer.Span);
+        var actual = TemplateRenderer.Render(template);
 
         Assert.Equal(value, actual);
     }
     [Template(
         """
         First text
-        §(Foo)
+        (:Foo:)
         Second Text
         """)]
     private partial class TextValueTextTemplate
@@ -90,9 +107,7 @@ public partial class GeneratorTests
     public void TextValueTextTemplateRendersExpectedString()
     {
         var template = new TextValueTextTemplate("FooBar");
-        var buffer = new DynamicallyAllocatedBuffer<Char>();
-        template.Render(ref buffer);
-        var actual = new String(buffer.Span);
+        var actual = TemplateRenderer.Render(template);
 
         Assert.Equal(
             """
@@ -104,25 +119,19 @@ public partial class GeneratorTests
     [Template(
         """
         First text
-        §{
+        {:
             for(var i = 0; i < 5; i++)
-                §(Foo)
-        }
+                (:Foo:)
+        :}
+        
         Second Text
-        """)]
-    private partial class TextCodeTextTemplate
-    {
-        public TextCodeTextTemplate(String foo) => Foo = foo;
-
-        private String Foo { get; }
-    }
+        """, Newline = Newline.Newline)]
+    private partial record TextCodeTextTemplate(String Foo);
     [Fact]
     public void TextCodeTextTemplateRendersExpectedString()
     {
         var template = new TextCodeTextTemplate("FooBar");
-        var buffer = new DynamicallyAllocatedBuffer<Char>();
-        template.Render(ref buffer);
-        var actual = new String(buffer.Span);
+        var actual = TemplateRenderer.Render(template);
 
         Assert.Equal(
             """
@@ -133,11 +142,57 @@ public partial class GeneratorTests
     }
     [Template(
         """
+        {: :}
+
+        Second Text
+        """)]
+    private partial record CodeTextTemplate;
+    [Fact]
+    public void CodeTextTemplateRendersExpectedString()
+    {
+        var template = new CodeTextTemplate();
+        var actual = TemplateRenderer.Render(template);
+
+        Assert.Equal("\nSecond Text", actual);
+    }
+    [Template("{: :}\n\nSecond Text", Newline = Newline.CarriageReturn)]
+    private partial record NewlineCodeTextTemplate;
+    [Fact]
+    public void NewlineCodeTextTemplateRendersExpectedString()
+    {
+        var template = new NewlineCodeTextTemplate();
+        var actual = TemplateRenderer.Render(template);
+
+        Assert.Equal("\rSecond Text", actual);
+    }
+    [Template("{: :}\r\n\r\nSecond Text", Newline = Newline.Newline)]
+    private partial record CarriageReturnNewlineCodeTextTemplate;
+    [Fact]
+    public void CarriageReturnNewlineCodeTextTemplateRendersExpectedString()
+    {
+        var template = new CarriageReturnNewlineCodeTextTemplate();
+        var actual = TemplateRenderer.Render(template);
+
+        Assert.Equal("\nSecond Text", actual);
+    }
+    [Template("{: :}\r\rSecond Text", Newline = Newline.Newline)]
+    private partial record CarriageReturnCodeTextTemplate;
+    [Fact]
+    public void CarriageReturnCodeTextTemplateRendersExpectedString()
+    {
+        var template = new CarriageReturnCodeTextTemplate();
+        var actual = TemplateRenderer.Render(template);
+
+        Assert.Equal("\nSecond Text", actual);
+    }
+    [Template(
+        """
         Prefix
-        §{
+        {:
             for(var i = 0; i < count; i++)
-                §(child)
-        }
+                (:child:)
+        :}
+
         Suffix
         """)]
     private partial class TextChildTemplateTextTemplate(SimpleValueTemplate child, Int32 count);
@@ -165,9 +220,7 @@ public partial class GeneratorTests
     public void TextChildTemplateTextTemplateRendersExpectedString(String value, Int32 count)
     {
         var template = new TextChildTemplateTextTemplate(new(value), count);
-        var buffer = new DynamicallyAllocatedBuffer<Char>();
-        template.Render(ref buffer);
-        var actual = new String(buffer.Span);
+        var actual = TemplateRenderer.Render(template);
 
         Assert.Equal(
             $"""
@@ -177,24 +230,22 @@ public partial class GeneratorTests
             """, actual);
     }
 
-    [Template("Hello, §(Value)!")]
+    [Template("Hello, (:Value:)!")]
     private readonly partial record struct StructValueTemplate(String Value);
     [Fact]
     public void StructTemplateImplementsTemplateType() => Assert.IsAssignableFrom<ITemplate>(new StructValueTemplate());
     [Fact]
     public void StructTemplateRendersExpectedString()
     {
-        var buffer = new DynamicallyAllocatedBuffer<Char>();
         var template = new StructValueTemplate("Struct");
-        template.Render(ref buffer);
-        var actual = new String(buffer.Span);
+        var actual = TemplateRenderer.Render(template);
 
         Assert.Equal("Hello, Struct!", actual);
     }
     [Fact]
     public void ToStringRendersExpectedString() => Assert.Equal("Hello, String!", new StructValueTemplate("String").ToString());
 
-    [Template("This §(Value) should not be rendered via §(nameof(ToString)).", GenerateToString = false)]
+    [Template("This (:Value:) should not be rendered via (:nameof(ToString):).", GenerateToString = false)]
     private readonly partial record struct CustomToStringTemplate(String Value)
     {
         public override String ToString() => "Custom ToString";
@@ -204,20 +255,20 @@ public partial class GeneratorTests
 
     [Template(
 """
-Dear §(Salutation),
+Dear (:Salutation:),
 
-§{
+{:
     foreach (var name in Names)
     {
-        §("  Hello ")§(name)§(", hope you are doing well!\n")
+        (:"  Hello ":)(:name:)(:", hope you are doing well!\n":)
     }
-}
+:}
 
 It's always great to stay in touch with everyone!
 
 Best regards,
-§(Closing)
-""")]
+(:Closing:)
+""", GenerateDebugInfo = true)]
     private readonly partial record struct LetterTemplate(String Salutation, List<String> Names, String Closing);
     [Fact]
     public void LetterTemplateRendersExpectedString()
@@ -232,7 +283,6 @@ Best regards,
               Hello Fred, hope you are doing well!
               Hello Tiffany, hope you are doing well!
 
-
             It's always great to stay in touch with everyone!
 
             Best regards,
@@ -242,9 +292,9 @@ Best regards,
 
     [Template(
 """
-§{
-    §(Tab, lines)
-}
+{:
+    (:Tab, lines:)
+:}
 """)]
     private partial class IndentationTemplate(String lines);
 
@@ -252,13 +302,7 @@ Best regards,
     public void IndentationIsAppliedToEveryNewLine()
     {
         var actual = new IndentationTemplate(
-            """
-            Foo
-            Foo
-            Foo
-            Foo
-            Foo
-            """)
+            "Foo\nFoo\nFoo\nFoo\nFoo")
             .ToString();
 
         Assert.Equal("\tFoo\n\tFoo\n\tFoo\n\tFoo\n\tFoo", actual);
@@ -275,9 +319,9 @@ Best regards,
     private partial class MainMethodTemplate;
     [Template(
         """
-        public class §(name)
+        public class (:name:)
         {
-        §(Tab, body)
+        (:Tab, body:)
         }
         """)]
     private partial class ClassTemplate(String name, ITemplate body);
@@ -299,23 +343,89 @@ Best regards,
             }
             """, actual);
     }
-    //[Template(
-    //    """
-    //    §{AssertInterned(__template);}
-    //    """)]
-    //private partial class InterningTemplate
-    //{
-    //    private static void AssertInterned(String template)
-    //    {
-    //        var attributeString = typeof(InterningTemplate).GetCustomAttribute<TemplateAttribute>()?.TemplateString;
-    //        Assert.Same(attributeString, template);
-    //        throw new InvalidOperationException("Marker Exception");
-    //    }
-    //}
-    //[Fact]
-    //public void GeneratedTemplateConstIsInterned()
-    //{
-    //    var ex = Assert.Throws<InvalidOperationException>(new InterningTemplate().ToString);
-    //    Assert.Equal("Marker Exception", ex.Message);
-    //}
+
+    [Template(
+        """
+        <div>
+        (:Tab, Body:)
+        </div>
+        """, BodyParameterName = "Body")]
+    partial class LayoutTemplate;
+
+    [Template(
+        """
+        {:var foo = "foo";:}
+        (:new BarTemplate():)(:'\n':)
+        (:new LayoutTemplate():)
+        <:
+        <h1>(:Greeting:), (:foo:)!</h1>
+        :>
+        """, GenerateDebugInfo = true)]
+    partial class HelloWorldInDivTemplate(String Greeting);
+    [Template("Bar")]
+    partial class BarTemplate;
+    [Fact]
+    public void BodyIsRendered()
+    {
+        var actual = new HelloWorldInDivTemplate("'Sup").ToString();
+        Assert.Equal("Bar\n\n<div>\n\n\t<h1>'Sup, foo!</h1>\n\n</div>", actual);
+    }
+    [Template("(::")]
+    partial class TopLevelEscapedOpenBlockTemplate;
+    [Fact]
+    public void RendersTopLevelEscapedOpenBlock()
+    {
+        var actual = new TopLevelEscapedOpenBlockTemplate().ToString();
+        Assert.Equal("(:", actual);
+    }
+    [Template("::>")]
+    partial class TopLevelEscapedCloseBlockTemplate;
+    [Fact]
+    public void RendersTopLevelEscapedCloseBlock()
+    {
+        var actual = new TopLevelEscapedCloseBlockTemplate().ToString();
+        Assert.Equal(":>", actual);
+    }
+    [Template("<::}", GenerateDebugInfo = true)]
+    partial class EmptyTopLevelBlockTemplate;
+    [Fact]
+    public void RendersEmptyTopLevelBlock()
+    {
+        var actual = new EmptyTopLevelBlockTemplate().ToString();
+        Assert.Equal("<::}", actual);
+    }
+    [Template("<child>(:Body:)</child>", BodyParameterName = "Body")]
+    partial class SubTemplateChild;
+    [Template("<parent>{:static (:new SubTemplateChild():)<:content:>:}</parent>")]
+    partial class SubTemplateParent;
+    [Fact]
+    public void SubTemplateRendersProvidedChild()
+    {
+        var actual = new SubTemplateParent().ToString();
+        Assert.Equal("<parent><child>content</child></parent>", actual);
+    }
+
+    [Template("(:Salutation:) (:Name:).", BodyParameterName = "Name")]
+    readonly partial record struct Header(String Salutation);
+    [Template("(:Salutation:) (:Name:).", BodyParameterName = "Name")]
+    readonly partial record struct Footer(String Salutation);
+    [Template(
+        """
+        {:
+            (:Header:)<:(:Name:):>
+            (:" Why is your name ":)(:Name:)(:"? ":)
+            static (:Footer:)<:user:>
+        :}
+        """)]
+    partial record Letter(Header Header, Footer Footer, String Name);
+    [Fact]
+    public void LetterRendersExpectedString()
+    {
+        var actual = new Letter(
+            new Header("Greetings,"),
+            new Footer("Goodbye,"),
+            "TeBeCo").ToString();
+
+        Assert.Equal("Greetings, TeBeCo. Why is your name TeBeCo? Goodbye, user.", actual);
+    }
 }

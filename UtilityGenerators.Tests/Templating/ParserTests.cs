@@ -1,216 +1,816 @@
 ﻿#pragma warning disable CS1591 // Missing XML comment for publicly visible type or member
-namespace RhoMicro.CodeAnalysis.UtilityGenerators.Tests.Templating;
+namespace RhoMicro.CodeAnalysis.Tests.Templating;
 
-using System.Collections.Immutable;
+using System;
+using System.Linq;
 
 using RhoMicro.CodeAnalysis.Library.Models;
 using RhoMicro.CodeAnalysis.Library.Models.Collections;
 using RhoMicro.CodeAnalysis.Templating;
+using RhoMicro.CodeAnalysis.Templating.Syntax;
 
-using Xunit.Sdk;
+using Diagnostic = CodeAnalysis.Templating.Diagnostic;
 
-public class ParserTests
+public partial class ParserTests(ITestOutputHelper testOutput)
 {
-    public static TheoryData<String, String, Object> Data
+    private void TestParser(
+        String sourceText,
+        Func<TokenList, TemplateSyntax>? syntaxFactory = null,
+        Func<TokenList, EquatableList<Diagnostic>>? diagnosticsFactory = null,
+        Int32 newlineLength = 1)
     {
-        get
+        // Arrange
+        var token = Microsoft.CodeAnalysis.CSharp.CSharpSyntaxTree
+            .ParseText(sourceText)
+            .GetRoot()
+            .DescendantTokens(_ => true)
+            .Single(t => t.RawKind is
+                (Int32)Microsoft.CodeAnalysis.CSharp.SyntaxKind.StringLiteralToken or
+                (Int32)Microsoft.CodeAnalysis.CSharp.SyntaxKind.MultiLineRawStringLiteralToken or
+                (Int32)Microsoft.CodeAnalysis.CSharp.SyntaxKind.SingleLineRawStringLiteralToken);
+
+        var templateString = TemplateString.Create(token, TestContext.Current.CancellationToken);
+        ScanResult scanResult;
+
+        using(var ctx = ModelCreationContext.CreateDefault(TestContext.Current.CancellationToken))
+            scanResult = Lexer.Scan(templateString, newlineLength, in ctx);
+
+        var nullableExpectedSyntax = syntaxFactory?.Invoke(new(scanResult.Tokens));
+        if(nullableExpectedSyntax is { } s)
         {
-            var result = new TheoryData<String, String, Object>();
-
-            addSyntaxData(
-                "text",
-                "Hello, World",
-                s => [new TextSyntaxModel(s)]);
-            addSyntaxData(
-                "value",
-                "§(Foo)",
-                s => [new ValueSyntaxModel(s)]);
-            addSyntaxData(
-                "code",
-                "§{Foo}",
-                s => [new CodeSyntaxModel(s, [new TextSyntaxModel(new(2, 3, s))])]);
-            addSyntaxData(
-                "value((text))",
-                "§((Foo))",
-                s => [new ValueSyntaxModel(new(0, 8, s))]);
-            addSyntaxData(
-                "code(value)",
-                "§{§(Foo)}",
-                s => [new CodeSyntaxModel(s, [new ValueSyntaxModel(new(2, 6, s))])]);
-            addSyntaxData(
-                "code(text value)",
-                "§{Hello§(Foo)}",
-                s => [new CodeSyntaxModel(s, [new TextSyntaxModel(new(2, 5, s)), new ValueSyntaxModel(new(7, 6, s))])]);
-            addSyntaxData(
-                "code(value text)",
-                "§{§(Foo)Hello}",
-                s => [new CodeSyntaxModel(s, [new ValueSyntaxModel(new(2, 6, s)), new TextSyntaxModel(new(8, 5, s))])]);
-            addSyntaxData(
-                "code({{text}})",
-                "§{{{Hello}}}",
-                s => [new CodeSyntaxModel(s, [new TextSyntaxModel(new(2, 9, s))])]);
-            addSyntaxData(
-                "code({text {value} text})",
-                "§{foreach(var a in l){§(a)}}",
-                s => [new CodeSyntaxModel(s, [new TextSyntaxModel(new(2, 20, s)), new ValueSyntaxModel(new(22, 4, s)), new TextSyntaxModel(new(26, 1, s))])]);
-            addSyntaxData(
-                "text value",
-                "Hello, §(Foo)",
-                s => [new TextSyntaxModel(new(0, 7, s)), new ValueSyntaxModel(new(7, 6, s))]);
-            addSyntaxData(
-                "esc value",
-                "\\§(Foo)",
-                s => [new TextSyntaxModel(new(1, 6, s))]);
-            addSyntaxData(
-                "esc esc value",
-                "\\\\§(Foo)",
-                s => [new TextSyntaxModel(new(1, 1, s)), new ValueSyntaxModel(new(2, 6, s))]);
-            addSyntaxData(
-                "value esc value",
-                "§(Bar)\\§(Foo)",
-                s => [new ValueSyntaxModel(new(0, 6, s)), new TextSyntaxModel(new(7, 6, s))]);
-            addSyntaxData(
-                "value esc esc value",
-                "§(Bar)\\\\§(Foo)",
-                s => [new ValueSyntaxModel(new(0, 6, s)), new TextSyntaxModel(new(7, 1, s)), new ValueSyntaxModel(new(8, 6, s))]);
-            addSyntaxData(
-                "text esc value",
-                "Bar\\§(Foo)",
-                s => [new TextSyntaxModel(new(0, 3, s)), new TextSyntaxModel(new(4, 6, s))]);
-            addSyntaxData(
-                "text esc esc value",
-                "Bar\\\\§(Foo)",
-                s => [new TextSyntaxModel(new(0, 3, s)), new TextSyntaxModel(new(4, 1, s)), new ValueSyntaxModel(new(5, 6, s))]);
-            addSyntaxData(
-                "text value text",
-                "Hello, §(Foo)!",
-                s => [new TextSyntaxModel(new(0, 7, s)), new ValueSyntaxModel(new(7, 6, s)), new TextSyntaxModel(new(13, 1, s))]);
-            addSyntaxData(
-                "code(text) text value text",
-                "§{Hello}, §(Foo)!",
-                s => [
-                    new CodeSyntaxModel(new(0, 8, s), [new TextSyntaxModel(new(2, 5, s))]),
-                    new TextSyntaxModel(new(8, 2, s)),
-                    new ValueSyntaxModel(new(10, 6, s)),
-                    new TextSyntaxModel(new(16, 1, s))]);
-            addSyntaxData(
-                "code(text) text value text",
-                "§{using(disposable){Console.WriteLine(disposable.Value);}}, §(Foo)!",
-                s => [
-                    new CodeSyntaxModel(new(0, 58, s), [new TextSyntaxModel(new(2, 55, s))]),
-                    new TextSyntaxModel(new(58, 2, s)),
-                    new ValueSyntaxModel(new(60, 6, s)),
-                    new TextSyntaxModel(new(66, 1, s))]);
-            addSyntaxData(
-                "text NL text",
-                "Hello,\n World",
-                s => [new TextSyntaxModel(s)]);
-            addSyntaxData(
-                "rsl text NL text",
-                """
-                Hello, 
-                World
-                """,
-                s => [new TextSyntaxModel(s)]);
-            addSyntaxData(
-                "complex sample",
-"""
-// \§(escaped hole)
-// \\§(Name) (unescaped hole)
-public §(Accessibility) class §(Name)
-{§{
-    foreach(var member in Members)
-    {
-        §(member)
-    }
-}}
-""",
-                s => [
-                    new TextSyntaxModel(new(0,3, s)),
-                    new TextSyntaxModel(new(4,19, s)),
-                    new TextSyntaxModel(new(24,1, s)),
-                    new ValueSyntaxModel(new(25,7,s)),
-                    new TextSyntaxModel(new(32,25, s)),
-                    new ValueSyntaxModel(new(57,16,s)),
-                    new TextSyntaxModel(new(73,7, s)),
-                    new ValueSyntaxModel(new(80,7, s)),
-                    new TextSyntaxModel(new(87,2, s)),
-                    new CodeSyntaxModel(new(89,69,s),[new TextSyntaxModel(new(91,50,s)), new ValueSyntaxModel(new(141, 9,s)), new TextSyntaxModel(new(150,7,s))]),
-                    new TextSyntaxModel(new(158,1,s))
-                    ]);
-
-            return result;
-
-            void addSyntaxData(String description, String source, Func<String, EquatableList<TemplateChildSyntaxModel>> childrenFactory) =>
-                result.Add(description, source, new TemplateSyntaxModel(source, childrenFactory.Invoke(source)));
-        }
-    }
-
-    [Theory]
-    [MemberData(nameof(Data))]
-    public void ParsesExpectedTemplateSyntax(String description, String source, Object expected)
-    {
-        TemplateSyntaxModel actual;
-        using(var ctx = ModelCreationContext.CreateDefault(default))
-        {
-            actual = TemplateSyntaxModel.Parse(source, in ctx);
+            TokenAssertionVisitor.Verify(s, "expected syntax was malformed");
         }
 
-        try
+        var nullableExpectedDiagnostics = diagnosticsFactory?.Invoke(new(scanResult.Tokens));
+
+        TemplateSyntax actualSyntax;
+        EquatableList<Diagnostic> actualDiagnostics;
+
+        // Act
+        using(var context = ModelCreationContext.CreateDefault(TestContext.Current.CancellationToken))
+            (actualSyntax, _, actualDiagnostics) = Parser.Parse(scanResult, in context);
+
+        // Assert
+        if(nullableExpectedSyntax is { } expectedSyntax)
         {
-            AssertEqual((TemplateSyntaxModel)expected, actual);
-        } catch(XunitException ex)
+            var left = expectedSyntax.ToXmlTreeString(TestContext.Current.CancellationToken);
+
+            if(!expectedSyntax.Equals(actualSyntax))
+            {
+                TokenAssertionVisitor.Verify(actualSyntax, "actual syntax was malformed");
+
+                var right = actualSyntax.ToXmlTreeString(TestContext.Current.CancellationToken);
+                TestHelpers.FailWithDiff(left, right);
+            }
+
+            testOutput.WriteLine(left);
+        }
+
+        if(nullableExpectedDiagnostics is { } expectedDiagnostics
+            && !expectedDiagnostics.Equals(actualDiagnostics))
         {
-            Assert.Fail($"{description}\n{ex}");
+            var left = String.Join('\n', expectedDiagnostics);
+            var right = String.Join('\n', actualDiagnostics);
+            TestHelpers.FailWithDiff(left, right);
         }
     }
 
     [Fact]
-    public void SourceSpanHasExpectedSourceValue()
-    {
-        var source = "Hello, World!";
-        using var ctx = ModelCreationContext.CreateDefault(default);
-        var sourceSpan = TemplateSyntaxModel.Parse(source, in ctx).Source;
+    public void Parser_Parses_complex_1() => TestParser(
+        """"
+        """
+        foo
+        {:
+            if(condition)
+            {
+                (:value:)
+            }
+        :}
+        """
+        """", t =>
+        new TemplateSyntax(
+            new NotEmptyTemplateSyntax(
+                new TemplateBlockBodySyntax([
+                    new TemplateBlockBodyChildSyntax(
+                        new TextSyntax([
+                            new TextChildSyntax(
+                                new NotEscapedTextSyntax([
+                                    new NotEscapedTextChildSyntax(
+                                        new NotNewlineSyntax(t.Next())),
+                                    new NotEscapedTextChildSyntax(
+                                        new NewlineSyntax(t.Next()))]))])),
+                    new TemplateBlockBodyChildSyntax(
+                        new CodeBlockSyntax(
+                            null,
+                            new OpenCodeBlockSyntax(t.Next()),
+                            new CodeBlockBodySyntax([
+                                new CodeBlockBodyChildSyntax(
+                                    new TextSyntax([
+                                    new TextChildSyntax(
+                                        new NotEscapedTextSyntax([
+                                            new NotEscapedTextChildSyntax(
+                                                new NewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NotNewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NotNewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new WhitespacesSyntax(t.Next()))]))])),
+                                new CodeBlockBodyChildSyntax(
+                                    new RenderBlockSyntax(
+                                    new RenderBlockHeadSyntax(
+                                        new OpenRenderBlockSyntax(t.Next()),
+                                        new TextSyntax([
+                                            new TextChildSyntax(
+                                                new NotEscapedTextSyntax([
+                                                    new NotEscapedTextChildSyntax(
+                                                        new NotNewlineSyntax(t.Next()))]))]),
+                                        new CloseRenderBlockSyntax(t.Next())),
+                                    null)),
+                                new CodeBlockBodyChildSyntax(
+                                    new TextSyntax([
+                                    new TextChildSyntax(
+                                        new NotEscapedTextSyntax([
+                                            new NotEscapedTextChildSyntax(
+                                                new NewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NotNewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NewlineSyntax(t.Next()))]))]))]),
+                            new CloseCodeBlockSyntax(t.Next()),
+                            null))]))));
+    [Fact]
+    public void Parser_Parses_complex_2() => TestParser(
+        """"
+        """
+        foo
+        {:
+            if(condition)
+            {
+                var value2 = "World";
+                (:value:)
+                <:
+                    Hello, (:value2:)!
+                :>
+            }
+        :}
+        """
+        """", t =>
+        new TemplateSyntax(
+            new NotEmptyTemplateSyntax(
+                new TemplateBlockBodySyntax([
+                    new TemplateBlockBodyChildSyntax(
+                        new TextSyntax([
+                            new TextChildSyntax(
+                                new NotEscapedTextSyntax([
+                                    new NotEscapedTextChildSyntax(
+                                        new NotNewlineSyntax(t.Next())),
+                                    new NotEscapedTextChildSyntax(
+                                        new NewlineSyntax(t.Next()))]))])),
+                    new TemplateBlockBodyChildSyntax(
+                        new CodeBlockSyntax(
+                            null,
+                            new OpenCodeBlockSyntax(t.Next()),
+                            new CodeBlockBodySyntax([
+                                new CodeBlockBodyChildSyntax(
+                                    new TextSyntax([
+                                        new TextChildSyntax(
+                                            new NotEscapedTextSyntax([
+                                            new NotEscapedTextChildSyntax(
+                                                new NewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NotNewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NotNewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NotNewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new WhitespacesSyntax(t.Next()))]))])),
+                                new CodeBlockBodyChildSyntax(
+                                    new RenderBlockSyntax(
+                                    new RenderBlockHeadSyntax(
+                                        new OpenRenderBlockSyntax(t.Next()),
+                                        new TextSyntax([
+                                            new TextChildSyntax(
+                                                new NotEscapedTextSyntax([
+                                                    new NotEscapedTextChildSyntax(
+                                                        new NotNewlineSyntax(t.Next()))]))]),
+                                        new CloseRenderBlockSyntax(t.Next())),
+                                    new RenderBlockBodySyntax(
+                                        new RenderBlockTriviaSyntax(
+                                            new NewlineSyntax(t.Next())),
+                                        new TemplateBlockSyntax(
+                                            new LeadingTriviaSyntax(
+                                                new WhitespacesSyntax(t.Next())),
+                                            new OpenTemplateBlockSyntax(t.Next()),
+                                            new TemplateBlockBodySyntax([
+                                                new TemplateBlockBodyChildSyntax(
+                                                    new TextSyntax([
+                                                        new TextChildSyntax(
+                                                            new NotEscapedTextSyntax([
+                                                                new NotEscapedTextChildSyntax(new NewlineSyntax(t.Next())),
+                                                                new NotEscapedTextChildSyntax(new NotNewlineSyntax(t.Next()))]))])),
+                                                new TemplateBlockBodyChildSyntax(
+                                                    new RenderBlockSyntax(
+                                                        new RenderBlockHeadSyntax(
+                                                            new OpenRenderBlockSyntax(t.Next()),
+                                                            new TextSyntax([
+                                                                new TextChildSyntax(
+                                                                    new NotEscapedTextSyntax([
+                                                                        new NotEscapedTextChildSyntax(
+                                                                            new NotNewlineSyntax(t.Next()))]))]),
+                                                            new CloseRenderBlockSyntax(t.Next())),
+                                                        null)),
+                                                new TemplateBlockBodyChildSyntax(
+                                                    new TextSyntax([
+                                                        new TextChildSyntax(
+                                                            new NotEscapedTextSyntax([
+                                                                new NotEscapedTextChildSyntax(
+                                                                    new NotNewlineSyntax(t.Next())),
+                                                                new NotEscapedTextChildSyntax(
+                                                                    new NewlineSyntax(t.Next())),
+                                                                new NotEscapedTextChildSyntax(
+                                                                    new WhitespacesSyntax(t.Next()))]))]))]),
+                                            new CloseTemplateBlockSyntax(t.Next()),
+                                            new TrailingTriviaSyntax(
+                                                new NewlineSyntax(t.Next())))))),
+                                new CodeBlockBodyChildSyntax(
+                                    new TextSyntax([
+                                        new TextChildSyntax(
+                                            new NotEscapedTextSyntax([
+                                                new NotEscapedTextChildSyntax(
+                                                    new NotNewlineSyntax(t.Next())),
+                                                new NotEscapedTextChildSyntax(
+                                                    new NewlineSyntax(t.Next()))]))]))]),
+                            new CloseCodeBlockSyntax(t.Next()),
+                            null))]))));
+    [Fact]
+    public void Parser_Parses_complex_3() => TestParser(
+        """"
+        """
+        foo
+        {:
+            if(condition)
+            {
+                var value2 = "World";
+                (::value::)<::
+                    Hello, (:value2:)!
+                ::>
+            }
+        :}
+        bar
+        """
+        """", t =>
+        new TemplateSyntax(
+            new NotEmptyTemplateSyntax(
+                new TemplateBlockBodySyntax([
+                    new TemplateBlockBodyChildSyntax(
+                        new TextSyntax([
+                            new TextChildSyntax(
+                                new NotEscapedTextSyntax([
+                                    new NotEscapedTextChildSyntax(
+                                        new NotNewlineSyntax(t.Next())),
+                                    new NotEscapedTextChildSyntax(
+                                        new NewlineSyntax(t.Next()))]))])),
+                    new TemplateBlockBodyChildSyntax(
+                        new CodeBlockSyntax(
+                            null,
+                            new OpenCodeBlockSyntax(t.Next()),
+                            new CodeBlockBodySyntax([
+                                new CodeBlockBodyChildSyntax(
+                                    new TextSyntax([
+                                        new TextChildSyntax(
+                                        new NotEscapedTextSyntax([
+                                            new NotEscapedTextChildSyntax(
+                                                new NewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NotNewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NotNewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NotNewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new WhitespacesSyntax(t.Next()))])),
+                                        new TextChildSyntax(
+                                        new EscapedTextSyntax(
+                                            new EscapedOpenBlockSyntax(
+                                                new OpenBlockSyntax(
+                                                    new OpenRenderBlockSyntax(t.Next())),
+                                                new EscapeColonSyntax(t.Next())))),
+                                        new TextChildSyntax(
+                                        new NotEscapedTextSyntax([
+                                            new NotEscapedTextChildSyntax(
+                                                new NotNewlineSyntax(t.Next()))])),
+                                        new TextChildSyntax(
+                                        new EscapedTextSyntax(
+                                            new EscapedCloseBlockSyntax(
+                                                new EscapeColonSyntax(t.Next()),
+                                                new CloseBlockSyntax(
+                                                    new CloseRenderBlockSyntax(t.Next()))))),
+                                        new TextChildSyntax(
+                                        new EscapedTextSyntax(
+                                            new EscapedOpenBlockSyntax(
+                                                new OpenBlockSyntax(
+                                                    new OpenTemplateBlockSyntax(t.Next())),
+                                                new EscapeColonSyntax(t.Next())))),
+                                        new TextChildSyntax(
+                                        new NotEscapedTextSyntax([
+                                            new NotEscapedTextChildSyntax(
+                                                new NewlineSyntax(t.Next())),
+                                            new NotEscapedTextChildSyntax(
+                                                new NotNewlineSyntax(t.Next()))]))])),
+                                new CodeBlockBodyChildSyntax(
+                                    new RenderBlockSyntax(
+                                        new RenderBlockHeadSyntax(
+                                            new OpenRenderBlockSyntax(t.Next()),
+                                            new TextSyntax([
+                                                new TextChildSyntax(
+                                                    new NotEscapedTextSyntax([
+                                                        new NotEscapedTextChildSyntax(
+                                                            new NotNewlineSyntax(t.Next()))]))]),
+                                            new CloseRenderBlockSyntax(t.Next())),
+                                        null)),
+                                new CodeBlockBodyChildSyntax(
+                                    new TextSyntax([
+                                        new TextChildSyntax(
+                                            new NotEscapedTextSyntax([
+                                                new NotEscapedTextChildSyntax(
+                                                    new NotNewlineSyntax(t.Next())),
+                                                new NotEscapedTextChildSyntax(
+                                                    new NewlineSyntax(t.Next())),
+                                                new NotEscapedTextChildSyntax(
+                                                    new WhitespacesSyntax(t.Next()))])),
+                                        new TextChildSyntax(
+                                            new EscapedTextSyntax(
+                                                new EscapedCloseBlockSyntax(
+                                                    new EscapeColonSyntax(t.Next()),
+                                                    new CloseBlockSyntax(
+                                                        new CloseTemplateBlockSyntax(t.Next()))))),
+                                        new TextChildSyntax(
+                                            new NotEscapedTextSyntax([
+                                                new NotEscapedTextChildSyntax(
+                                                    new NewlineSyntax(t.Next())),
+                                                new NotEscapedTextChildSyntax(
+                                                    new NotNewlineSyntax(t.Next())),
+                                                new NotEscapedTextChildSyntax(
+                                                    new NewlineSyntax(t.Next()))]))]))]),
+                            new CloseCodeBlockSyntax(t.Next()),
+                            new TrailingTriviaSyntax(
+                                new NewlineSyntax(t.Next())))),
+                    new TemplateBlockBodyChildSyntax(
+                        new TextSyntax([
+                            new TextChildSyntax(
+                                new NotEscapedTextSyntax([
+                                    new NotEscapedTextChildSyntax(
+                                        new NotNewlineSyntax(t.Next()))]))]))]))));
 
-        Assert.Equal(source.Length, sourceSpan.Length);
-        Assert.Equal(0, sourceSpan.Start);
-        Assert.Equal(source, sourceSpan.Text);
-        Assert.Equal(source, sourceSpan.AsSpan);
-    }
+    [Fact]
+    public void Parser_Parses_complex_escaped1() => TestParser(
+        """"
+        """
+        {:var foo = "foo";:}
+        (:new BarTemplate():)
+        (:Greeting:)
+        (:new LayoutTemplate():)<:
+            <h1>(:Greeting:), (:foo:)!</h1>
+        :>
+        """
+        """", t =>
+        new TemplateSyntax(
+            new NotEmptyTemplateSyntax(
+                new TemplateBlockBodySyntax([
+                    new TemplateBlockBodyChildSyntax(
+                        new CodeBlockSyntax(
+                            null,
+                            new OpenCodeBlockSyntax(t.Next()),
+                            new CodeBlockBodySyntax([
+                                new CodeBlockBodyChildSyntax(
+                                    new TextSyntax([
+                                        new TextChildSyntax(
+                                            new NotEscapedTextSyntax([
+                                                new NotEscapedTextChildSyntax(
+                                                    new NotNewlineSyntax(t.Next()))]))]))]),
+                            new CloseCodeBlockSyntax(t.Next()),
+                            new TrailingTriviaSyntax(
+                                new NewlineSyntax(t.Next())))),
+                    new TemplateBlockBodyChildSyntax(
+                        new RenderBlockSyntax(
+                            new RenderBlockHeadSyntax(
+                                new OpenRenderBlockSyntax(t.Next()),
+                                new TextSyntax([
+                                    new TextChildSyntax(
+                                        new NotEscapedTextSyntax([
+                                            new NotEscapedTextChildSyntax(
+                                                new NotNewlineSyntax(t.Next()))]))]),
+                                new CloseRenderBlockSyntax(t.Next())),
+                            null)),
+                    new TemplateBlockBodyChildSyntax(
+                        new TextSyntax([
+                            new TextChildSyntax(
+                                new NotEscapedTextSyntax([
+                                    new NotEscapedTextChildSyntax(
+                                        new NewlineSyntax(t.Next()))]))])),
+                    new TemplateBlockBodyChildSyntax(
+                        new RenderBlockSyntax(
+                            new RenderBlockHeadSyntax(
+                                new OpenRenderBlockSyntax(t.Next()),
+                                new TextSyntax([
+                                    new TextChildSyntax(
+                                        new NotEscapedTextSyntax([
+                                            new NotEscapedTextChildSyntax(
+                                                new NotNewlineSyntax(t.Next()))]))]),
+                                new CloseRenderBlockSyntax(t.Next())),
+                            null)),
+                    new TemplateBlockBodyChildSyntax(
+                        new TextSyntax([
+                            new TextChildSyntax(
+                                new NotEscapedTextSyntax([
+                                    new NotEscapedTextChildSyntax(
+                                        new NewlineSyntax(t.Next()))]))])),
+                    new TemplateBlockBodyChildSyntax(
+                        new RenderBlockSyntax(
+                            new RenderBlockHeadSyntax(
+                                new OpenRenderBlockSyntax(t.Next()),
+                                new TextSyntax([
+                                    new TextChildSyntax(
+                                        new NotEscapedTextSyntax([
+                                            new NotEscapedTextChildSyntax(
+                                                new NotNewlineSyntax(t.Next()))]))]),
+                                new CloseRenderBlockSyntax(t.Next())),
+                            new RenderBlockBodySyntax(
+                                null,
+                                new TemplateBlockSyntax(
+                                    null,
+                                    new OpenTemplateBlockSyntax(t.Next()),
+                                    new TemplateBlockBodySyntax([
+                                        new TemplateBlockBodyChildSyntax(
+                                            new TextSyntax([
+                                                new TextChildSyntax(
+                                                    new NotEscapedTextSyntax([
+                                                        new NotEscapedTextChildSyntax(
+                                                            new NewlineSyntax(t.Next())),
+                                                        new NotEscapedTextChildSyntax(
+                                                            new NotNewlineSyntax(t.Next()))]))])),
+                                        new TemplateBlockBodyChildSyntax(
+                                            new RenderBlockSyntax(
+                                                new RenderBlockHeadSyntax(
+                                                    new OpenRenderBlockSyntax(t.Next()),
+                                                    new TextSyntax([
+                                                        new TextChildSyntax(
+                                                            new NotEscapedTextSyntax([
+                                                                new NotEscapedTextChildSyntax(
+                                                                    new NotNewlineSyntax(t.Next()))]))]),
+                                                    new CloseRenderBlockSyntax(t.Next())),
+                                                null)),
+                                        new TemplateBlockBodyChildSyntax(
+                                            new TextSyntax([
+                                                new TextChildSyntax(
+                                                    new NotEscapedTextSyntax([
+                                                        new NotEscapedTextChildSyntax(
+                                                            new NotNewlineSyntax(t.Next()))]))])),
+                                        new TemplateBlockBodyChildSyntax(
+                                            new RenderBlockSyntax(
+                                                new RenderBlockHeadSyntax(
+                                                    new OpenRenderBlockSyntax(t.Next()),
+                                                    new TextSyntax([
+                                                        new TextChildSyntax(
+                                                            new NotEscapedTextSyntax([
+                                                                new NotEscapedTextChildSyntax(
+                                                                    new NotNewlineSyntax(t.Next()))]))]),
+                                                    new CloseRenderBlockSyntax(t.Next())),
+                                                null)),
+                                        new TemplateBlockBodyChildSyntax(
+                                            new TextSyntax([
+                                                new TextChildSyntax(
+                                                    new NotEscapedTextSyntax([
+                                                        new NotEscapedTextChildSyntax(
+                                                            new NotNewlineSyntax(t.Next())),
+                                                        new NotEscapedTextChildSyntax(
+                                                            new NewlineSyntax(t.Next()))]))]))]),
+                                    new CloseTemplateBlockSyntax(t.Next()),
+                                    null))))]))));
+    [Fact]
+    public void Parser_Parses_complex_escaped2() => TestParser(
+        """"
+        """
+        foo
+        {:
+            if(condition)
+            {
+                var value2 = "World";
+                (:value:)<::
+                    Hello, (:value2:)!
+                ::> 
+            }
+        :}
+        bar
+        """
+        """", t =>
+        new TemplateSyntax(
+            new NotEmptyTemplateSyntax(
+                new TemplateBlockBodySyntax([
+                    new TemplateBlockBodyChildSyntax(
+                        new TextSyntax([
+                            new TextChildSyntax(
+                                new NotEscapedTextSyntax([
+                                    new NotEscapedTextChildSyntax(
+                                        new NotNewlineSyntax(t.Next())),
+                                    new NotEscapedTextChildSyntax(
+                                        new NewlineSyntax(t.Next()))
+                                    ]))])),
+                    new TemplateBlockBodyChildSyntax(
+                        new CodeBlockSyntax(
+                            null,
+                            new OpenCodeBlockSyntax(t.Next()),
+                            new CodeBlockBodySyntax([
+                                new CodeBlockBodyChildSyntax(
+                                    new TextSyntax([
+                                        new TextChildSyntax(
+                                            new NotEscapedTextSyntax([
+                                                new NotEscapedTextChildSyntax(
+                                                    new NewlineSyntax(t.Next())),
+                                                new NotEscapedTextChildSyntax(
+                                                    new NotNewlineSyntax(t.Next())),
+                                                new NotEscapedTextChildSyntax(
+                                                    new NewlineSyntax(t.Next())),
+                                                new NotEscapedTextChildSyntax(
+                                                    new NotNewlineSyntax(t.Next())),
+                                                new NotEscapedTextChildSyntax(
+                                                    new NewlineSyntax(t.Next())),
+                                                new NotEscapedTextChildSyntax(
+                                                    new NotNewlineSyntax(t.Next())),
+                                                new NotEscapedTextChildSyntax(
+                                                    new NewlineSyntax(t.Next())),
+                                                new NotEscapedTextChildSyntax(
+                                                    new WhitespacesSyntax(t.Next()))]))])),
+                                    new CodeBlockBodyChildSyntax(
+                                        new RenderBlockSyntax(
+                                            new RenderBlockHeadSyntax(
+                                                new OpenRenderBlockSyntax(t.Next()),
+                                                new TextSyntax([
+                                                    new TextChildSyntax(
+                                                        new NotEscapedTextSyntax([
+                                                            new NotEscapedTextChildSyntax(
+                                                                new NotNewlineSyntax(t.Next()))]))]),
+                                                new CloseRenderBlockSyntax(t.Next())),
+                                            null)),
+                                    new CodeBlockBodyChildSyntax(
+                                        new TextSyntax([
+                                            new TextChildSyntax(
+                                                new EscapedTextSyntax(
+                                                    new EscapedOpenBlockSyntax(
+                                                        new OpenBlockSyntax(
+                                                            new OpenTemplateBlockSyntax(t.Next())),
+                                                        new EscapeColonSyntax(t.Next())))),
+                                            new TextChildSyntax(
+                                                new NotEscapedTextSyntax([
+                                                    new NotEscapedTextChildSyntax(
+                                                        new NewlineSyntax(t.Next())),
+                                                    new NotEscapedTextChildSyntax(
+                                                        new NotNewlineSyntax(t.Next()))]))])),
+                                    new CodeBlockBodyChildSyntax(
+                                        new RenderBlockSyntax(
+                                            new RenderBlockHeadSyntax(
+                                                new OpenRenderBlockSyntax(t.Next()),
+                                                new TextSyntax([
+                                                    new TextChildSyntax(
+                                                        new NotEscapedTextSyntax([
+                                                            new NotEscapedTextChildSyntax(
+                                                                new NotNewlineSyntax(t.Next()))]))]),
+                                                new CloseRenderBlockSyntax(t.Next())),
+                                            null)),
+                                    new CodeBlockBodyChildSyntax(
+                                        new TextSyntax([
+                                            new TextChildSyntax(
+                                                new NotEscapedTextSyntax([
+                                                    new NotEscapedTextChildSyntax(
+                                                        new NotNewlineSyntax(t.Next())),
+                                                    new NotEscapedTextChildSyntax(
+                                                        new NewlineSyntax(t.Next())),
+                                                    new NotEscapedTextChildSyntax(
+                                                        new WhitespacesSyntax(t.Next()))])),
+                                            new TextChildSyntax(
+                                                new EscapedTextSyntax(
+                                                    new EscapedCloseBlockSyntax(
+                                                        new EscapeColonSyntax(t.Next()),
+                                                        new CloseBlockSyntax(
+                                                            new CloseTemplateBlockSyntax(t.Next()))))),
+                                            new TextChildSyntax(
+                                                new NotEscapedTextSyntax([
+                                                    new NotEscapedTextChildSyntax(
+                                                        new WhitespacesSyntax(t.Next())),
+                                                    new NotEscapedTextChildSyntax(
+                                                        new NewlineSyntax(t.Next())),
+                                                    new NotEscapedTextChildSyntax(
+                                                        new NotNewlineSyntax(t.Next())),
+                                                    new NotEscapedTextChildSyntax(
+                                                        new NewlineSyntax(t.Next()))]))]))]),
+                            new CloseCodeBlockSyntax(t.Next()),
+                            new TrailingTriviaSyntax(
+                                new NewlineSyntax(t.Next())))),
+                    new TemplateBlockBodyChildSyntax(
+                        new TextSyntax([
+                            new TextChildSyntax(
+                                new NotEscapedTextSyntax([
+                                    new NotEscapedTextChildSyntax(
+                                        new NotNewlineSyntax(t.Next()))]))]))]))));
+    [Theory]
+    [InlineData(
+        """
+        ""
+        """)]
+    [InlineData(
+        """
+        "Hello, World!"
+        """)]
+    [InlineData(
+        """
+        "(:Foo:)"
+        """)]
+    [InlineData(
+        """
+        "Lorem ipsum dolor sit amet"
+        """)]
+    [InlineData(
+        """
+        "🚀🌟💻🎉"
+        """)]
+    [InlineData(
+        """
+        "This is a longer string to test"
+        """)]
+    [InlineData(
+        """
+        "1234567890"
+        """)]
+    [InlineData(
+        """
+        "Special characters: !@#$%^&*()_+-=[]{}|;:'\",.<>?/\\"
+        """)]
+    [InlineData(
+        """
+        "Single space "
+        """)]
+    [InlineData(
+        """
+        " Leading space"
+        """)]
+    [InlineData(
+        """
+        "Line\nBreak"
+        """)]
+    [InlineData(
+        """
+        "Tab\tCharacter"
+        """)]
+    [InlineData(
+        """
+        "NullChar\u0000Here"
+        """)]
+    [InlineData(
+        """
+        "こんにちは"
+        """)]
+    [InlineData(
+        """
+        "你好"
+        """)]
+    [InlineData(
+        """
+        "안녕하세요"
+        """)]
+    [InlineData(
+        """
+        "Привет"
+        """)]
+    [InlineData(
+        """
+        "مرحبا"
+        """)]
+    [InlineData(
+        """
+        "String with an emoji 🤖 at the end"
+        """)]
+    [InlineData(
+        """
+        "Repeat: Repeat: Repeat: Repeat:"
+        """)]
+    [InlineData(
+        """"
+        """
+        First text
+        (:Foo:)
+        Second Text
+        """
+        """")]
+    [InlineData(
+        """"
+        """
+        First text
+        {:
+            for(var i = 0; i < 5; i++)
+                (:Foo:)
+        :}
+        Second Text
+        """
+        """")]
+    [InlineData(
+        """"
+        """
+        Prefix
+        {:
+            for(var i = 0; i < count; i++)
+                (:child:)
+        :}
+        Suffix
+        """
+        """")]
+    [InlineData(
+        """"
+        "This (:Value:) should not be rendered via (:nameof(ToString):)."
+        """")]
+    [InlineData(
+        """"
+        """
+        Dear (:Salutation:),
 
-    private static void AssertEqual(TemplateSyntaxBaseModel expected, TemplateSyntaxBaseModel actual)
-    {
-        if(expected.GetType() != actual.GetType())
-            fail("type mismatch");
+        {:
+            foreach (var name in Names)
+            {
+                (:"  Hello ":)(:name:)(:", hope you are doing well!\n":)
+            }
+        :}
 
-        switch(expected)
+        It's always great to stay in touch with everyone!
+
+        Best regards,
+        (:Closing:)
+        """
+        """")]
+    [InlineData(
+        """"
+        """
+        {:
+            (:Tab, lines:)
+        :}
+        """
+        """")]
+    [InlineData(
+        """"
+        """
+        public static void Main()
         {
-            case TemplateSyntaxModel expectedTemplate:
-                var actualTemplate = (TemplateSyntaxModel)actual;
-                if(expectedTemplate.Children.Count != actualTemplate.Children.Count)
-                    fail($"template children count mismatch: expected {expectedTemplate.Children.Count}, actual was {actualTemplate.Children.Count}");
-
-                for(var i = 0; i < expectedTemplate.Children.Count; i++)
-                    AssertEqual(expectedTemplate.Children[i], actualTemplate.Children[i]);
-
-                break;
-            case CodeSyntaxModel expectedCode:
-                var actualCode = (CodeSyntaxModel)actual;
-                if(expectedCode.Children.Count != actualCode.Children.Count)
-                    fail($"code children count mismatch: expected {expectedCode.Children.Count}, actual was {actualCode.Children.Count}");
-
-                for(var i = 0; i < expectedCode.Children.Count; i++)
-                    AssertEqual(expectedCode.Children[i], actualCode.Children[i]);
-
-                break;
-            default:
-                if(!expected.Equals(actual))
-                    fail("syntax mismatch");
-
-                break;
+            Console.WriteLine("Hello, World!");
+            return;
         }
+        """
+        """")]
+    [InlineData(
+        """"
+        """
+        public class (:name:)
+        {
+        (:Tab, body:)
+        }
+        """
+        """")]
+    [InlineData(
+        """"
+        """
+        <div>
+        (:Tab, Body:)
+        </div>
+        """
+        """")]
+    [InlineData(
+        """
+        {:var foo = "foo";:}
+        (:new bartemplate():)
 
-        void fail(String message) =>
-            Assert.Fail($"{message}\nexpected:\n{expected.ToDebugString()}\nactual:\n{actual.ToDebugString()}");
-    }
+        (:new layouttemplate():)
+        <:
+        <h1>(:greeting:), (:foo:)!</h1>
+        :>
+        """)]
+    [InlineData(
+        """
+        "Bar"
+        """)]
+    public void DoesNotThrow(String sourceText) => TestParser(sourceText);
 }
