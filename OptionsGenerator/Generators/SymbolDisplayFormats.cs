@@ -1,4 +1,4 @@
-﻿namespace RhoMicro.CodeAnalysis.OptionsGenerator.Generators;
+namespace RhoMicro.CodeAnalysis.OptionsGenerator.Generators;
 
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;

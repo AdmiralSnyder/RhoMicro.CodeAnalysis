@@ -1,4 +1,4 @@
-﻿namespace RhoMicro.CodeAnalysis.OptionsGenerator.Generators;
+namespace RhoMicro.CodeAnalysis.OptionsGenerator.Generators;
 
 using System;
 using System.Threading;
