@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 namespace RhoMicro.CodeAnalysis;
 
 [Template(
@@ -6,8 +8,6 @@ namespace RhoMicro.CodeAnalysis;
     (:new NamespaceTemplate<VisitorClassTemplate>(model.Signature, new VisitorClassTemplate(model)):)
     (:new NamespaceTemplate<GenericVisitorInterfaceTemplate>(model.Signature, new GenericVisitorInterfaceTemplate(model)):)
     (:new NamespaceTemplate<GenericVisitorClassTemplate>(model.Signature, new GenericVisitorClassTemplate(model)):)
-    (:new NamespaceTemplate<RewriterInterfaceTemplate>(model.Signature, new RewriterInterfaceTemplate(model)):)
-    (:new NamespaceTemplate<RewriterClassTemplate>(model.Signature, new RewriterClassTemplate(model)):)
     (:new NamespaceTemplate<TypeTemplate<BaseNodeBodyTemplate>>(model.Signature, new TypeTemplate<BaseNodeBodyTemplate>(model.Signature, new BaseNodeBodyTemplate(model))):)
     {:
         foreach(var node in model.Nodes)
